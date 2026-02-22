@@ -1,3 +1,4 @@
+import json
 import asyncio
 import random
 import aiohttp
@@ -13,14 +14,14 @@ from random import randint
 from urllib.parse import urlsplit
 
 
-BASE_URL = "https://mangapark.org"
+BASE_URL = "https://comix.to"
 # get content from clipboard
 clipboard = clipboard_get()
 limit = 5
 
 
 def get_user_agent_and_cookies(
-    url: str = "https://mangapark.org", tries: int = 3
+    url: str = BASE_URL, tries: int = 3
 ) -> tuple[str | None, dict]:
     if tries <= 0:
         return None, {}
@@ -45,7 +46,7 @@ async def download(
     i: int,
     total_images: int,
     session: aiohttp.ClientSession,
-    c: int,
+    chapter_number: str,
     comic_title: str,
     chapter_title: str,
     total_chapters: int,
@@ -55,26 +56,21 @@ async def download(
     retry_count: int = 0,
 ):
     # if retry_count > 10:
-    if retry_count > 1:
+    if retry_count > 0:
         print(
-            f"Failed to download image {i} of {total_images} in chapter {c} of {total_chapters} after multiple retries."
+            f"Failed to download image {i} of {total_images} in chapter {chapter_number} of {total_chapters} after multiple retries."
         )
         return
-    elif retry_count > 0:
-        # prefixes = [f'https://s{n:02}' for n in range(1, 11)]
-        # if any(url.startswith(prefix) for prefix in prefixes):
-        #     prefix = f'https://s{retry_count:02}'
-        #     url = f'{prefix}{url[len(prefix):]}'
-        path = urlsplit(url).path
-        url = f"{BASE_URL}{path}"
 
-    file_path = f"../{comic_title}/{c:05} {comic_title} - {chapter_title} - {i:05}"
+    file_path = (
+        f"../{comic_title}/{chapter_number} {comic_title} - {chapter_title} - {i:05}"
+    )
     if len(file_path) > 250:
-        file_path = f"../{comic_title}/{c:05} - {chapter_title} - {i:05}"
+        file_path = f"../{comic_title}/{chapter_number} - {chapter_title} - {i:05}"
     file_list = glob.glob(f"{file_path}.*")
     if file_list and len(file_list) > 0 and os.path.getsize(file_list[0]) > 8000:
         print(
-            f"Chapter: {c} of {total_chapters}: Image {i} of {total_images} already exists, skipping download..."
+            f"Chapter: {chapter_number} of {total_chapters}: Image {i} of {total_images} already exists, skipping download..."
         )
         return
     try:
@@ -96,7 +92,7 @@ async def download(
             ) as f:
                 f.write(file)
             print(
-                f"Chapter: {c} of {total_chapters}: Finished downloading image {i} of {total_images}..."
+                f"Chapter: {chapter_number} of {total_chapters}: Finished downloading image {i} of {total_images}..."
             )
     except Exception as e:
         print(
@@ -108,7 +104,7 @@ async def download(
             i,
             total_images,
             session,
-            c,
+            chapter_number,
             comic_title,
             chapter_title,
             total_chapters,
@@ -121,7 +117,7 @@ async def download(
 
 async def download_chapter(
     chapter_url: str,
-    c: int,
+    chapter_number: str,
     comic_title: str,
     total_chapters: int,
     headers: dict,
@@ -132,11 +128,11 @@ async def download_chapter(
     async with session.get(chapter_url, headers=headers, cookies=cookies) as response:
         chapter_page_source = await response.text()
     soup = bs4.BeautifulSoup(chapter_page_source, "html.parser")
-    chapter_title = soup.find("title").text.replace(
-        " - Share Any Manga on MangaPark", ""
+    chapter_title = soup.find("title").text
+    print(
+        f"Downloading chapter {chapter_number} of {total_chapters}: {chapter_title}..."
     )
-    print(f"Downloading chapter {c} of {total_chapters}: {chapter_title}...")
-    image_urls = re.findall(r"https?://[^\"]+/media/[^\"]+", chapter_page_source)
+    image_urls = re.findall(r"(https?://[^\"]+/\d+\.[a-z]+)\\\"", chapter_page_source)
 
     def f7(seq):
         seen = set()
@@ -144,9 +140,11 @@ async def download_chapter(
         return [x for x in seq if not (x in seen or seen_add(x))]
 
     image_urls = f7(image_urls)
+    image_urls = sorted(image_urls, key=lambda x: x.split("/")[-1])
     tasks = []
     i = 0
     total = len(image_urls)
+
     for img_url in image_urls:
         i += 1
         tasks.append(
@@ -155,7 +153,7 @@ async def download_chapter(
                 i,
                 total,
                 session,
-                c,
+                chapter_number,
                 comic_title,
                 chapter_title,
                 total_chapters,
@@ -167,31 +165,66 @@ async def download_chapter(
     await asyncio.gather(*tasks)
 
 
+async def get_chapter_ids(
+    comic_id: str, headers: dict, cookies: dict, session: aiohttp.ClientSession
+) -> dict[str, str]:
+    page = 1
+    chapters = {}
+    while True:
+        chapters_url = f"https://comix.to/api/v2/manga/{comic_id}/chapters?limit=20&page={page}&order[number]=asc"
+        async with session.get(
+            chapters_url, headers=headers, cookies=cookies
+        ) as response:
+            chapters_source = await response.text()
+        chapters_data = json.loads(chapters_source)["result"]
+        for item in chapters_data["items"]:
+            if item["scanlation_group"] is None or chapters.get(item["number"]) is None:
+                chapters[item["number"]] = item["chapter_id"]
+        if (
+            chapters_data["pagination"]["current_page"]
+            >= chapters_data["pagination"]["last_page"]
+        ):
+            break
+        page += 1
+    return chapters
+
+
 async def main():
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/102.0.0.0 Safari/537.36"
     }
+    clipboard = clipboard_get()
+    prefix = f"{BASE_URL}/title/"
+    if not clipboard.startswith(prefix):
+        print(f"Clipboard content does not start with {prefix}, exiting.")
+        exit(1)
+    comic_id_regex = re.compile(rf"{prefix}(\d+)-")
+    match = comic_id_regex.match(clipboard)
+    if not match:
+        print("Could not extract comic ID from clipboard content, exiting.")
+        exit(1)
+    comic_id = match.group(1)
     user_agent, cookies = get_user_agent_and_cookies(url=clipboard)
-    cookies.update({"nsfw": "2"})
+    # cookies.update({"nsfw": "2"})
     if user_agent is None:
         comic_source = requests.get(clipboard, headers=headers, cookies=cookies).text
     else:
         headers = {"User-Agent": user_agent}
         comic_source = requests.get(clipboard, headers=headers, cookies=cookies).text
+
+    headers["referer"] = BASE_URL
+
     print(f"Fetching comic information from {clipboard}...")
-    # print(f"{comic_source=}")
+    chapter_ids_dict = await get_chapter_ids(
+        comic_id, headers, cookies, aiohttp.ClientSession()
+    )
+
     soup = bs4.BeautifulSoup(comic_source, "html.parser")
-    comic_title = soup.find("title").text.replace(" - Share Any Manga on MangaPark", "")
+    comic_title = soup.find("title").text.replace(" - Manga", "")
     # make folder with title
     os.makedirs(f"../{comic_title}", exist_ok=True)
     print(f"Downloading {comic_title}...")
-
-    comic_prefix = clipboard.replace("https://mangapark.org", "")
-    chapters_pattern = re.compile(rf"{comic_prefix}/\d+[^\"]+")
-    chapter_suffixes = re.findall(chapters_pattern, comic_source)
-    chapter_suffixes = sorted(list(set(chapter_suffixes)))
-    chapter_urls = [BASE_URL + suffix for suffix in chapter_suffixes]
-    print(f"Found {len(chapter_urls)} chapters to download.")
+    print(f"Found {len(chapter_ids_dict)} chapters to download.")
 
     semaphore = asyncio.BoundedSemaphore(limit)
     async with aiohttp.ClientSession(
@@ -199,13 +232,12 @@ async def main():
     ) as session:
         tasks = []
         i = 0
-        total_chapters = len(chapter_urls)
-        for chapter_url in chapter_urls:
-            i += 1
+        total_chapters = len(chapter_ids_dict)
+        for chapter_number, chapter_id in chapter_ids_dict.items():
             tasks.append(
                 download_chapter(
-                    chapter_url,
-                    i,
+                    f"{clipboard}/{chapter_id}-chapter-{chapter_number}",
+                    f"{float(chapter_number):0>5.1f}",
                     comic_title,
                     total_chapters,
                     headers,
@@ -228,7 +260,7 @@ if __name__ == "__main__":
     exit(0)
     container = None
     try:
-        client = docker.DockerClient(base_url="unix://Users/waliedothman/Library/Containers/com.docker.docker/Data/docker.raw.sock")
+        client = docker.DockerClient(base_url="unix://var/run/docker.sock")
         client.images.pull("frederikuni/docker-cloudflare-bypasser:latest")
         container = client.containers.run(
             "frederikuni/docker-cloudflare-bypasser:latest",
