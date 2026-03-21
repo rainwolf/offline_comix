@@ -11,7 +11,6 @@ import glob
 from pandas.io.clipboard import clipboard_get
 from time import sleep
 from random import randint
-from urllib.parse import urlsplit
 
 
 BASE_URL = "https://comix.to"
@@ -196,12 +195,14 @@ async def main():
     clipboard = clipboard_get()
     prefix = f"{BASE_URL}/title/"
     if not clipboard.startswith(prefix):
-        print(f"Clipboard content does not start with {prefix}, exiting.")
+        print(f"Clipboard content does not start with {prefix}, exiting.\n{clipboard}")
         exit(1)
-    comic_id_regex = re.compile(rf"{prefix}(\d+)-")
+    comic_id_regex = re.compile(rf"{prefix}([^-]+)-")
     match = comic_id_regex.match(clipboard)
     if not match:
-        print("Could not extract comic ID from clipboard content, exiting.")
+        print(
+            f"Could not extract comic ID from clipboard content, exiting.\n{clipboard}"
+        )
         exit(1)
     comic_id = match.group(1)
     user_agent, cookies = get_user_agent_and_cookies(url=clipboard)
@@ -215,9 +216,10 @@ async def main():
     headers["referer"] = BASE_URL
 
     print(f"Fetching comic information from {clipboard}...")
-    chapter_ids_dict = await get_chapter_ids(
-        comic_id, headers, cookies, aiohttp.ClientSession()
-    )
+    async with aiohttp.ClientSession() as tmp_session:
+        chapter_ids_dict = await get_chapter_ids(
+            comic_id, headers, cookies, tmp_session
+        )
 
     soup = bs4.BeautifulSoup(comic_source, "html.parser")
     comic_title = soup.find("title").text.replace(" - Manga", "")
