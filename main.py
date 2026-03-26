@@ -95,7 +95,7 @@ async def download(
             )
     except Exception as e:
         print(
-            f"Error downloading image {i} of {total_images} in chapter {c} of {total_chapters}: {e}, retrying..."
+            f"Error downloading image {i} of {total_images} in chapter {chapter_number} of {total_chapters}: {e}, retrying..."
         )
         await asyncio.sleep(random.randint(1, 3))
         await download(
